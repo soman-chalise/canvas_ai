@@ -16,7 +16,7 @@ class AIClient:
         try:
             with open(path, "rb") as f:
                 res = self.client.models.generate_content(
-                    model="gemini-2.0-flash",
+                    model="gemini-2.5-flash",
                     contents=[types.Part.from_bytes(data=f.read(), mime_type="image/png"), prompt]
                 )
             

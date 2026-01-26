@@ -9,9 +9,18 @@ def capture_screen_with_overlay(points, textboxes):
     draw = ImageDraw.Draw(screenshot)
 
     # Draw strokes
-    for line in points:
-        if len(line) > 1:
-            draw.line([(p.x(), p.y()) for p in line], fill=(255, 255, 0), width=4)
+    for stroke in points:
+        pts = stroke["points"]
+        color = stroke["color"]
+        size = stroke["size"]
+
+        if len(pts) > 1:
+            draw.line(
+                [(p.x(), p.y()) for p in pts],
+                fill=(color.red(), color.green(), color.blue()),
+                width=size
+            )
+
 
     # Draw textboxes
     for msg, tx, ty, tw, th in textboxes:
