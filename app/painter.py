@@ -1,6 +1,7 @@
 from PyQt6.QtCore import Qt, QPoint, QPointF, QRect, QRectF
 from PyQt6.QtGui import QPainter, QColor, QPen, QPainterPath, QPixmap
 import math
+from .tool_state import ToolMode, ShapeType
 
 class Painter:
     def __init__(self, parent, tool_state):
@@ -31,16 +32,12 @@ class Painter:
                 
             self.canvas_pixmap = new_pixmap
 
-    # --- NEW: Explicit Clear Method ---
     def clear(self):
         """Clears both the data history and the visual cache layer."""
         self.strokes.clear()
         self.redo_stack.clear()
-        
-        # Clear the visual cache
         if self.canvas_pixmap:
             self.canvas_pixmap.fill(Qt.GlobalColor.transparent)
-            
         self.parent.update()
 
     def undo(self):
@@ -83,12 +80,13 @@ class Painter:
 
         self._ensure_canvas_size()
 
-        if self.tool_state.mode == "erase":
+        # --- ENUM USAGE ---
+        if self.tool_state.mode == ToolMode.ERASE:
             self.drawing = True
             self._erase_at_point(event.position().toPoint())
             return
 
-        if self.tool_state.mode == "draw":
+        if self.tool_state.mode == ToolMode.DRAW:
             self.drawing = True
             self.redo_stack.clear()
             
@@ -104,7 +102,7 @@ class Painter:
                 "size": self.tool_state.brush_size
             }
 
-        elif self.tool_state.mode == "shape":
+        elif self.tool_state.mode == ToolMode.SHAPE:
             self.drawing = True
             self.redo_stack.clear()
             self.shape_start = event.position().toPoint()
@@ -116,15 +114,15 @@ class Painter:
 
         pos = event.position().toPoint()
 
-        if self.tool_state.mode == "erase":
+        if self.tool_state.mode == ToolMode.ERASE:
             self._erase_at_point(pos)
 
-        elif self.tool_state.mode == "draw" and self.current_stroke:
+        elif self.tool_state.mode == ToolMode.DRAW and self.current_stroke:
             self.current_stroke["points"].append(pos)
             self.current_stroke["path"].lineTo(QPointF(pos))
             self.parent.update()
 
-        elif self.tool_state.mode == "shape" and self.shape_start:
+        elif self.tool_state.mode == ToolMode.SHAPE and self.shape_start:
             self.shape_preview = pos
             self.parent.update()
 
@@ -134,10 +132,7 @@ class Painter:
 
         self.drawing = False
 
-        if self.tool_state.mode == "erase":
-            pass
-
-        elif self.tool_state.mode == "draw" and self.current_stroke:
+        if self.tool_state.mode == ToolMode.DRAW and self.current_stroke:
             self.strokes.append(self.current_stroke)
             
             painter = QPainter(self.canvas_pixmap)
@@ -148,12 +143,13 @@ class Painter:
             self.current_stroke = None
             self.parent.update()
 
-        elif self.tool_state.mode == "shape" and self.shape_start:
+        elif self.tool_state.mode == ToolMode.SHAPE and self.shape_start:
             end_point = event.position().toPoint()
+            # Threshold to prevent accidental dots
             if (end_point - self.shape_start).manhattanLength() > 5:
                 shape_data = {
                     "type": "shape",
-                    "shape": self.tool_state.shape_type,
+                    "shape": self.tool_state.shape_type, # Stores Enum
                     "start": self.shape_start,
                     "end": end_point,
                     "color": QColor(self.tool_state.color),
@@ -171,6 +167,7 @@ class Painter:
             self.parent.update()
 
     def _erase_at_point(self, erase_point):
+        # Optimization: Quadtree would be better, but this logic is 'okay' for small buffers
         erase_radius = self.tool_state.brush_size * 4
         indices_to_remove = []
         erase_rect_f = QRectF(
@@ -185,8 +182,10 @@ class Painter:
         for i, item in enumerate(self.strokes):
             hit = False
             if item["type"] == "stroke":
+                # Quick bounding box check first
                 if item["path"].controlPointRect().intersects(erase_rect_f):
                     for point in item["points"]:
+                        # Exact check
                         if (point - erase_point).manhattanLength() < erase_radius:
                             hit = True
                             break
@@ -208,20 +207,20 @@ class Painter:
             self.parent.update()
 
     def paint_event(self, event):
+        # Draw the cached canvas
         painter = QPainter(self.parent)
-        painter.fillRect(self.parent.rect(), QColor(0, 50, 150, 20))
-
         self._ensure_canvas_size()
-
         if self.canvas_pixmap:
             painter.drawPixmap(0, 0, self.canvas_pixmap)
 
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         
+        # Draw current active stroke (live drawing)
         if self.current_stroke:
             self._draw_item(painter, self.current_stroke)
             
-        if self.tool_state.mode == "shape" and self.shape_start and self.shape_preview:
+        # Draw active shape preview
+        if self.tool_state.mode == ToolMode.SHAPE and self.shape_start and self.shape_preview:
             preview_item = {
                 "shape": self.tool_state.shape_type,
                 "start": self.shape_start,
@@ -233,7 +232,8 @@ class Painter:
             preview_item["color"].setAlpha(150)
             self._draw_item(painter, preview_item)
         
-        if self.tool_state.mode == "erase" and hasattr(self.parent, 'last_mouse_pos'):
+        # Draw Eraser Cursor
+        if self.tool_state.mode == ToolMode.ERASE and hasattr(self.parent, 'last_mouse_pos'):
             r = self.tool_state.brush_size * 4
             painter.setPen(QPen(QColor(255, 255, 255, 180), 1, Qt.PenStyle.DashLine))
             painter.setBrush(QColor(255, 100, 100, 50))
@@ -245,14 +245,15 @@ class Painter:
         painter.setBrush(Qt.BrushStyle.NoBrush)
 
         start, end = shape["start"], shape["end"]
+        s_type = shape["shape"]
         
-        if shape["shape"] == "rectangle":
+        if s_type == ShapeType.RECTANGLE:
             painter.drawRect(QRect(start, end))
-        elif shape["shape"] == "circle":
+        elif s_type == ShapeType.CIRCLE:
             painter.drawEllipse(QRect(start, end))
-        elif shape["shape"] == "line":
+        elif s_type == ShapeType.LINE:
             painter.drawLine(start, end)
-        elif shape["shape"] == "arrow":
+        elif s_type == ShapeType.ARROW:
             self._draw_arrow(painter, start, end, shape["size"])
 
     def _draw_arrow(self, painter, start, end, size):

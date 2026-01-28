@@ -1,12 +1,11 @@
 import sys
 import os
 import logging
-# 1. ADDED QStyle to imports
 from PyQt6.QtWidgets import QApplication, QSystemTrayIcon, QMenu, QStyle
-from PyQt6.QtGui import QIcon, QAction
+from PyQt6.QtGui import QAction
 from PyQt6.QtCore import QObject, pyqtSignal, Qt
-import keyboard
 
+# Import your modules
 from app.ui import GhostUI
 from app.chat_ui import ChatWindow
 from app.ai_client import AIClient
@@ -14,29 +13,37 @@ from app.ai_client import AIClient
 # --- DEV LOGGING ---
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout)  # Print to console
+        # logging.FileHandler("app.log")   # Uncomment for file logging
+    ]
 )
 
-class HotkeyBridge(QObject):
-    triggered = pyqtSignal()
-
-def create_tray_icon(app, ghost_window):
-    # 2. FIXED: Use QStyle.StandardPixmap.SP_ComputerIcon
+def create_tray_icon(app, toggle_callback):
+    """
+    Creates a system tray icon that toggles the overlay when clicked.
+    """
+    # Use standard computer icon
     icon = app.style().standardIcon(QStyle.StandardPixmap.SP_ComputerIcon)
-    
     tray_icon = QSystemTrayIcon(icon, app)
-    tray_icon.setToolTip("Canvas Copilot (Alt+Q)")
+    tray_icon.setToolTip("Canvas Copilot")
 
+    # Double click or Single click to toggle
+    tray_icon.activated.connect(lambda reason: toggle_callback() if reason in (
+        QSystemTrayIcon.ActivationReason.Trigger, 
+        QSystemTrayIcon.ActivationReason.DoubleClick
+    ) else None)
+
+    # Context Menu
     menu = QMenu()
     
-    # Action: Open Overlay
-    action_open = QAction("Annotate Screen (Alt+Q)", app)
-    action_open.triggered.connect(lambda: ghost_window.showFullScreen())
+    action_open = QAction("Annotate Screen", app)
+    action_open.triggered.connect(toggle_callback)
     menu.addAction(action_open)
 
     menu.addSeparator()
 
-    # Action: Exit
     action_exit = QAction("Exit", app)
     action_exit.triggered.connect(app.quit)
     menu.addAction(action_exit)
@@ -45,57 +52,56 @@ def create_tray_icon(app, ghost_window):
     tray_icon.show()
     return tray_icon
 
-if __name__ == "__main__":
-    # Fix DPI Scaling
+def main():
+    # 1. High DPI Fixes (Must be before QApplication)
     os.environ["QT_AUTO_SCREEN_SCALE_FACTOR"] = "1"
     QApplication.setHighDpiScaleFactorRoundingPolicy(
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
     )
 
     app = QApplication(sys.argv)
-
-    # Don't quit just because windows are hidden (System Tray Mode)
-    app.setQuitOnLastWindowClosed(False)
+    app.setQuitOnLastWindowClosed(False) # Daemon mode
 
     try:
         logging.info("Initializing Backend...")
+        
+        # 2. Dependency Injection
+        # Initialize the client once here, pass it down
         ai_client = AIClient()
         
-        # Init Windows
+        # 3. Init Windows
+        # We don't show them yet
         chat_win = ChatWindow(ai_client)
-        
         ghost_win = GhostUI(ai_client)
+        
+        # 4. Wiring Signals
+        # When GhostUI finishes capture -> Open ChatWindow
         ghost_win.capture_completed.connect(chat_win.handle_capture)
-        ghost_win.hide() 
 
-        # Init System Tray
-        tray = create_tray_icon(app, ghost_win)
-        
-        # Init Hotkeys
-        bridge = HotkeyBridge()
-        
-        def show_overlay_safe():
-            if not ghost_win.isVisible():
-                ghost_win.clear_all() 
-                ghost_win.showFullScreen() 
+        # 5. Toggle Logic
+        def toggle_overlay():
+            if ghost_win.isVisible():
+                ghost_win.hide()
+            else:
+                # Reset state before showing
+                ghost_win.clear_all()
+                ghost_win.showFullScreen()
                 ghost_win.raise_()
                 ghost_win.activateWindow()
-            else:
-                logging.info("Overlay is already active.")
-        
-        bridge.triggered.connect(show_overlay_safe)
-        
-        # Register Hotkey (Alt+Q)
-        keyboard.add_hotkey('alt+q', lambda: bridge.triggered.emit())
+
+        # 6. System Tray
+        tray = create_tray_icon(app, toggle_overlay)
 
         logging.info("-------------------------------------------")
-        logging.info("Canvas Copilot Ready!")
-        logging.info("1. Minimized to System Tray (Bottom Right)")
-        logging.info("2. Press Alt+Q to open the overlay")
+        logging.info("Canvas Copilot Running")
+        logging.info("-> Click the System Tray icon to Annotate")
         logging.info("-------------------------------------------")
         
         sys.exit(app.exec())
         
     except Exception as e:
-        logging.critical(f"Startup Error: {e}", exc_info=True)
+        logging.critical(f"Fatal Startup Error: {e}", exc_info=True)
         sys.exit(1)
+
+if __name__ == "__main__":
+    main()

@@ -1,54 +1,42 @@
-# capture.py
 import os
-import io
 from datetime import datetime
-from PIL import Image, ImageDraw
-
-from .utils import get_timestamped_path, load_font
-
 from PyQt6.QtWidgets import QApplication
-from PyQt6.QtGui import QScreen
-from PyQt6.QtCore import QBuffer, QIODevice
+from PyQt6.QtGui import QPainter, QPixmap, QColor
+from PyQt6.QtCore import Qt
 
-def capture_screen_with_overlay(points, textboxes):
-    # 1. Grab screen using Qt (High DPI aware)
+def get_timestamped_path():
+    if not os.path.exists("captures"):
+        os.makedirs("captures")
+    return os.path.join("captures", f"q_{datetime.now().strftime('%H%M%S')}.jpg")
+
+def capture_screen_with_overlay(overlay_widget):
+    """
+    Captures the physical screen and composites the overlay widget on top.
+    This guarantees WYSIWYG (What You See Is What You Get).
+    """
     screen = QApplication.primaryScreen()
-    screenshot = screen.grabWindow(0)
     
-    # 2. Convert to PIL
-    buffer = QBuffer()
-    buffer.open(QIODevice.OpenModeFlag.ReadWrite)
-    screenshot.save(buffer, "PNG")
-    screenshot_pil = Image.open(io.BytesIO(buffer.data()))
-    draw = ImageDraw.Draw(screenshot_pil)
+    # 1. Grab the Clean Desktop (Background)
+    # We grab the specific geometry of the screen where the widget is
+    screen_geo = overlay_widget.screen().geometry()
+    background_pixmap = screen.grabWindow(0, screen_geo.x(), screen_geo.y(), screen_geo.width(), screen_geo.height())
     
-    # 3. Draw your annotations (Lines/Shapes)
-    for stroke in points:
-        color = stroke["color"]
-        rgb = (color.red(), color.green(), color.blue())
-        if stroke.get("type") == "stroke":
-            pts = [(p.x(), p.y()) for p in stroke["points"]]
-            if len(pts) > 1:
-                draw.line(pts, fill=rgb, width=stroke["size"])
-        elif stroke.get("type") == "shape":
-            start, end = stroke["start"], stroke["end"]
-            draw.rectangle([start.x(), start.y(), end.x(), end.y()], outline=rgb, width=stroke["size"])
+    # 2. Grab the Overlay (Drawings + Text)
+    # render() or grab() handles the transparency and child widgets (textboxes)
+    overlay_pixmap = overlay_widget.grab()
 
-    # 4. Draw Textboxes
-    for msg, tx, ty, tw, th in textboxes:
-        if msg:
-            draw.rectangle([tx, ty, tx+tw, ty+th], fill=(30, 30, 30))
-            font = load_font(int(th * 0.6))
-            draw.text((tx+10, ty+5), msg, fill=(255, 255, 0), font=font)
+    # 3. Composite them
+    final_pixmap = QPixmap(background_pixmap.size())
+    final_pixmap.fill(Qt.GlobalColor.transparent)
+    
+    painter = QPainter(final_pixmap)
+    painter.drawPixmap(0, 0, background_pixmap)
+    painter.drawPixmap(0, 0, overlay_pixmap)
+    painter.end()
 
-    # --- PRODUCTION FIX: RESIZE IMAGE ---
-    # This prevents the 429 error by reducing payload size
-    max_dim = 1600 
-    if screenshot_pil.width > max_dim or screenshot_pil.height > max_dim:
-        screenshot_pil.thumbnail((max_dim, max_dim), Image.Resampling.LANCZOS)
-
+    # 4. Save (Qt handles compression)
     path = get_timestamped_path()
-    # Save as JPEG with 85% quality to further reduce token usage
-    if path.endswith(".png"): path = path.replace(".png", ".jpg")
-    screenshot_pil.convert("RGB").save(path, "JPEG", quality=85, optimize=True)
+    # Save as JPEG with 85% quality
+    final_pixmap.save(path, "JPEG", 85)
+    
     return path
