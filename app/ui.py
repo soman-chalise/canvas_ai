@@ -1,5 +1,3 @@
-
-
 from PyQt6.QtWidgets import (
     QMainWindow, QLineEdit, QWidget, QHBoxLayout,
     QPushButton, QApplication, QVBoxLayout, QTextEdit,
@@ -317,26 +315,22 @@ class CommandBar(QWidget):
         self.btn_attach.clicked.connect(self.attach_files)
         layout.addWidget(self.btn_attach)
 
-        # 2. Model Selector (DYNAMIC FETCH)
+        # 2. Model Selector
         self.model_combo = QComboBox()
         
-        # --- START CHANGE: Dynamic Model Loading ---
-        available_models = ["gemini-2.0-flash"] # Default cloud model
+        available_models = ["gemini-2.5-flash"]
         try:
-            # Fetch list from local Ollama instance
             models_info = ollama.list()
-            # Extract the model names (e.g., 'llava:latest', 'llama3:latest')
-            if 'models' in models_info:
+            if hasattr(models_info, 'get') and 'models' in models_info:
                 for m in models_info['models']:
                     available_models.append(m['model'])
-        except Exception as e:
-            print(f"Could not fetch Ollama models: {e}")
-            # Fallback options if Ollama isn't running
+            elif isinstance(models_info, list):
+                for m in models_info:
+                    available_models.append(m['model'])
+        except Exception:
             available_models.extend(["llava", "llama3"])
 
         self.model_combo.addItems(available_models)
-        # --- END CHANGE ---
-
         self.model_combo.setFixedWidth(140)
         self.model_combo.setStyleSheet("""
             QComboBox {
@@ -410,7 +404,6 @@ class CommandBar(QWidget):
 
 
 class GhostUI(QMainWindow):
-    # Signal: Image Path, Prompt, Files, Model Name
     capture_completed = pyqtSignal(str, str, list, str)
 
     def __init__(self, ai_client=None):
@@ -430,7 +423,6 @@ class GhostUI(QMainWindow):
         self.brush_popover = None
         self.shape_popover = None
 
-        # Command Bar
         self.command_bar = CommandBar(self)
         screen_width = self.screen().geometry().width()
         screen_height = self.screen().geometry().height()
@@ -440,7 +432,6 @@ class GhostUI(QMainWindow):
         self.command_bar.input.returnPressed.connect(self.submit_to_ai)
         self.command_bar.show()
 
-        # Toolbar Setup
         self.toolbar = QWidget(self)
         self.toolbar.setObjectName("Toolbar")
         self.toolbar.setFixedSize(540, 60)
@@ -481,6 +472,7 @@ class GhostUI(QMainWindow):
 
         self.toolbar.raise_()
         self.toolbar.show()
+        self._is_submitting = False
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -536,12 +528,12 @@ class GhostUI(QMainWindow):
         self.textboxes.append(box)
 
     def clear_all(self):
-        self.painter.strokes.clear()
-        self.painter.redo_stack.clear()
+        # --- FIXED: Use the painter's new clear method ---
+        self.painter.clear()
+        
         for box in self.textboxes:
             box.close()
         self.textboxes.clear()
-        self.update()
         
     def clear_checks(self):
         for b in [self.btn_draw, self.btn_erase, self.btn_text, self.btn_shape]:
@@ -627,26 +619,37 @@ class GhostUI(QMainWindow):
         super().closeEvent(event)
 
     def submit_to_ai(self):
+        """Modified to prevent double-submission (409 trigger)"""
+        if self._is_submitting:
+            return
+            
         prompt = self.command_bar.input.text()
         attached_files = self.command_bar.attached_files
-        # Get selected model from Dropdown
         selected_model = self.command_bar.model_combo.currentText()
         
+        # If no prompt, check textboxes
         if not prompt.strip() and not attached_files:
             prompts = [b.text() for b in self.textboxes if b.text().strip()]
             prompt = " ".join(prompts) if prompts else "Explain this."
 
+        self._is_submitting = True  # Set guard
+        self.command_bar.btn_enter.setEnabled(False) # Visual feedback
+        
         text_data = [(b.text(), b.x(), b.y(), b.width(), b.height()) for b in self.textboxes]
         
+        # Hide UI elements for clean capture
         self.toolbar.hide()
         self.command_bar.hide()
         for b in self.textboxes: b.hide()
         
         QApplication.processEvents()
         
-        path = capture_screen_with_overlay(self.painter.strokes, text_data)
-        
-        self.close()
-        
-        # Emit signal including the selected model
-        self.capture_completed.emit(path, prompt, attached_files, selected_model)
+        try:
+            path = capture_screen_with_overlay(self.painter.strokes, text_data)
+            self.close()
+            # Emit signal to ChatWindow
+            self.capture_completed.emit(path, prompt, attached_files, selected_model)
+        finally:
+            # Reset state for next time the overlay is opened
+            self._is_submitting = False
+            self.command_bar.btn_enter.setEnabled(True)

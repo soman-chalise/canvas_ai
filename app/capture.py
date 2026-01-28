@@ -1,50 +1,54 @@
+# capture.py
 import os
+import io
 from datetime import datetime
-from PIL import ImageGrab, ImageDraw, ImageFont
+from PIL import Image, ImageDraw
 
 from .utils import get_timestamped_path, load_font
 
+from PyQt6.QtWidgets import QApplication
+from PyQt6.QtGui import QScreen
+from PyQt6.QtCore import QBuffer, QIODevice
+
 def capture_screen_with_overlay(points, textboxes):
-    screenshot = ImageGrab.grab(all_screens=True)
-    draw = ImageDraw.Draw(screenshot)
-
-    # Draw strokes
-# Draw strokes
+    # 1. Grab screen using Qt (High DPI aware)
+    screen = QApplication.primaryScreen()
+    screenshot = screen.grabWindow(0)
+    
+    # 2. Convert to PIL
+    buffer = QBuffer()
+    buffer.open(QIODevice.OpenModeFlag.ReadWrite)
+    screenshot.save(buffer, "PNG")
+    screenshot_pil = Image.open(io.BytesIO(buffer.data()))
+    draw = ImageDraw.Draw(screenshot_pil)
+    
+    # 3. Draw your annotations (Lines/Shapes)
     for stroke in points:
+        color = stroke["color"]
+        rgb = (color.red(), color.green(), color.blue())
         if stroke.get("type") == "stroke":
-            # Use the "points" list we saved in Painter for compatibility with Pillow
-            pts = stroke["points"] 
-            color = stroke["color"]
-            size = stroke["size"]
-
+            pts = [(p.x(), p.y()) for p in stroke["points"]]
             if len(pts) > 1:
-                draw.line(
-                    [(p.x(), p.y()) for p in pts],
-                    fill=(color.red(), color.green(), color.blue()),
-                    width=size
-                )
-        # Add this if you want shapes (rectangles/circles) to show up in the screenshot
+                draw.line(pts, fill=rgb, width=stroke["size"])
         elif stroke.get("type") == "shape":
-            # Basic rectangle support for the demo
             start, end = stroke["start"], stroke["end"]
-            color = stroke["color"]
-            draw.rectangle(
-                [start.x(), start.y(), end.x(), end.y()],
-                outline=(color.red(), color.green(), color.blue()),
-                width=stroke["size"]
-            )
+            draw.rectangle([start.x(), start.y(), end.x(), end.y()], outline=rgb, width=stroke["size"])
 
-
-    # Draw textboxes
+    # 4. Draw Textboxes
     for msg, tx, ty, tw, th in textboxes:
         if msg:
             draw.rectangle([tx, ty, tx+tw, ty+th], fill=(30, 30, 30))
-            font_size = int(th * 0.6)
-            font = load_font(font_size)
-            draw.text((tx+10, ty+(th-font_size)//2-2), msg, fill=(255, 255, 0), font=font)
+            font = load_font(int(th * 0.6))
+            draw.text((tx+10, ty+5), msg, fill=(255, 255, 0), font=font)
 
-    if not os.path.exists("captures"):
-        os.makedirs("captures")
+    # --- PRODUCTION FIX: RESIZE IMAGE ---
+    # This prevents the 429 error by reducing payload size
+    max_dim = 1600 
+    if screenshot_pil.width > max_dim or screenshot_pil.height > max_dim:
+        screenshot_pil.thumbnail((max_dim, max_dim), Image.Resampling.LANCZOS)
+
     path = get_timestamped_path()
-    screenshot.save(path)
+    # Save as JPEG with 85% quality to further reduce token usage
+    if path.endswith(".png"): path = path.replace(".png", ".jpg")
+    screenshot_pil.convert("RGB").save(path, "JPEG", quality=85, optimize=True)
     return path
