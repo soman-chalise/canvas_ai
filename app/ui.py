@@ -1,14 +1,16 @@
+
+
 from PyQt6.QtWidgets import (
     QMainWindow, QLineEdit, QWidget, QHBoxLayout,
     QPushButton, QApplication, QVBoxLayout, QTextEdit,
-    QColorDialog, QSlider, QLabel, QComboBox
+    QColorDialog, QSlider, QLabel, QComboBox, QFileDialog
 )
-from PyQt6.QtCore import Qt, QPoint, QPropertyAnimation, QEasingCurve, QRect
+from PyQt6.QtCore import Qt, QPoint, QRect, pyqtSignal
 from PyQt6.QtGui import (
     QFont, QCursor, QPainter, QColor,
     QPainterPath, QPen, QLinearGradient, QRadialGradient
 )
-
+import ollama
 from .painter import Painter
 from .capture import capture_screen_with_overlay
 from .tool_state import ToolState
@@ -170,7 +172,6 @@ class ResizableTextbox(QLineEdit):
         self.resize_start_pos = QPoint()
         self.resize_start_size = None
         
-        # Delete button
         self.delete_btn = QPushButton("✕", self)
         self.delete_btn.setFixedSize(24, 24)
         self.delete_btn.move(self.width() - 28, 4)
@@ -203,12 +204,10 @@ class ResizableTextbox(QLineEdit):
         super().leaveEvent(event)
 
     def resizeEvent(self, event):
-        # Keep delete button in top-right corner
         self.delete_btn.move(self.width() - 28, 4)
         super().resizeEvent(event)
 
     def mousePressEvent(self, event):
-        # Check if clicking in resize zone (bottom-right corner)
         resize_zone = QRect(self.width() - 20, self.height() - 20, 20, 20)
         
         if resize_zone.contains(event.position().toPoint()):
@@ -232,7 +231,6 @@ class ResizableTextbox(QLineEdit):
         elif self.dragging:
             self.move(self.mapToParent(event.position().toPoint() - self.offset))
         else:
-            # Update cursor based on position
             resize_zone = QRect(self.width() - 20, self.height() - 20, 20, 20)
             if resize_zone.contains(event.position().toPoint()):
                 self.setCursor(Qt.CursorShape.SizeFDiagCursor)
@@ -249,20 +247,15 @@ class ResizableTextbox(QLineEdit):
 
     def paintEvent(self, event):
         super().paintEvent(event)
-        
-        # Draw resize handle indicator
         if not self.resizing:
             painter = QPainter(self)
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-            
-            # Small triangle in bottom-right
             handle_size = 12
             points = [
                 QPoint(self.width() - 2, self.height() - handle_size),
                 QPoint(self.width() - 2, self.height() - 2),
                 QPoint(self.width() - handle_size, self.height() - 2)
             ]
-            
             painter.setBrush(QColor(255, 255, 255, 80))
             painter.setPen(Qt.PenStyle.NoPen)
             painter.drawPolygon(points)
@@ -292,9 +285,135 @@ class GlassButton(QPushButton):
             }
         """)
 
+class CommandBar(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(740, 60)
+        
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(15, 5, 15, 5)
+        layout.setSpacing(10)
+        
+        self.setObjectName("CommandBar")
+        self.setStyleSheet("""
+            QWidget#CommandBar {
+                background: rgba(30, 30, 40, 220);
+                border: 1px solid rgba(255, 255, 255, 40);
+                border-radius: 30px;
+            }
+        """)
+
+        # 1. Attachment Button
+        self.btn_attach = QPushButton("📎")
+        self.btn_attach.setFixedSize(36, 36)
+        self.btn_attach.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_attach.setStyleSheet("""
+            QPushButton {
+                background: rgba(255, 255, 255, 10);
+                border: none; border-radius: 18px; color: white; font-size: 16px;
+            }
+            QPushButton:hover { background: rgba(255, 255, 255, 30); }
+        """)
+        self.btn_attach.clicked.connect(self.attach_files)
+        layout.addWidget(self.btn_attach)
+
+        # 2. Model Selector (DYNAMIC FETCH)
+        self.model_combo = QComboBox()
+        
+        # --- START CHANGE: Dynamic Model Loading ---
+        available_models = ["gemini-2.0-flash"] # Default cloud model
+        try:
+            # Fetch list from local Ollama instance
+            models_info = ollama.list()
+            # Extract the model names (e.g., 'llava:latest', 'llama3:latest')
+            if 'models' in models_info:
+                for m in models_info['models']:
+                    available_models.append(m['model'])
+        except Exception as e:
+            print(f"Could not fetch Ollama models: {e}")
+            # Fallback options if Ollama isn't running
+            available_models.extend(["llava", "llama3"])
+
+        self.model_combo.addItems(available_models)
+        # --- END CHANGE ---
+
+        self.model_combo.setFixedWidth(140)
+        self.model_combo.setStyleSheet("""
+            QComboBox {
+                background: rgba(0, 0, 0, 0.3);
+                color: #ddd; border: 1px solid rgba(255,255,255,30);
+                border-radius: 8px; padding: 5px; font-size: 11px;
+            }
+            QComboBox::drop-down { border: none; }
+            QComboBox QAbstractItemView {
+                background: rgb(40, 40, 50); color: white;
+                selection-background-color: rgba(100, 100, 255, 0.5);
+            }
+        """)
+        layout.addWidget(self.model_combo)
+
+        # 3. Input Field
+        self.input = QLineEdit()
+        self.input.setPlaceholderText("Ask about the screen...")
+        self.input.setFont(QFont("Segoe UI", 12))
+        self.input.setStyleSheet("""
+            QLineEdit {
+                background: transparent; border: none; color: white;
+            }
+        """)
+        layout.addWidget(self.input)
+
+        # 4. File Counter
+        self.file_badge = QLabel("")
+        self.file_badge.setStyleSheet("color: #aaa; font-size: 11px; margin-right: 5px;")
+        self.file_badge.hide()
+        layout.addWidget(self.file_badge)
+
+        # 5. Enter Button
+        self.btn_enter = QPushButton("➤")
+        self.btn_enter.setFixedSize(40, 40)
+        self.btn_enter.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_enter.setStyleSheet("""
+            QPushButton {
+                background: rgba(100, 100, 255, 180);
+                border: none; border-radius: 20px; color: white; font-size: 16px;
+            }
+            QPushButton:hover { background: rgba(120, 120, 255, 200); }
+        """)
+        layout.addWidget(self.btn_enter)
+
+        self.attached_files = []
+
+    def attach_files(self):
+        files, _ = QFileDialog.getOpenFileNames(
+            self, "Attach Context", "", 
+            "Documents (*.pdf *.txt *.md *.py *.js *.html *.docx)"
+        )
+        if files:
+            self.attached_files.extend(files)
+            self.update_badge()
+
+    def update_badge(self):
+        count = len(self.attached_files)
+        if count > 0:
+            self.file_badge.setText(f"{count} file(s)")
+            self.file_badge.show()
+        else:
+            self.file_badge.hide()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        path = QPainterPath()
+        path.addRoundedRect(self.rect().toRectF(), 30, 30)
+        painter.fillPath(path, QColor(30, 30, 40, 200))
+
 
 class GhostUI(QMainWindow):
-    def __init__(self, ai_client):
+    # Signal: Image Path, Prompt, Files, Model Name
+    capture_completed = pyqtSignal(str, str, list, str)
+
+    def __init__(self, ai_client=None):
         super().__init__()
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.Tool)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
@@ -311,11 +430,20 @@ class GhostUI(QMainWindow):
         self.brush_popover = None
         self.shape_popover = None
 
-        # Toolbar
+        # Command Bar
+        self.command_bar = CommandBar(self)
+        screen_width = self.screen().geometry().width()
+        screen_height = self.screen().geometry().height()
+        
+        self.command_bar.move((screen_width - 740) // 2, screen_height - 100)
+        self.command_bar.btn_enter.clicked.connect(self.submit_to_ai)
+        self.command_bar.input.returnPressed.connect(self.submit_to_ai)
+        self.command_bar.show()
+
+        # Toolbar Setup
         self.toolbar = QWidget(self)
         self.toolbar.setObjectName("Toolbar")
         self.toolbar.setFixedSize(540, 60)
-        screen_width = self.screen().geometry().width()
         self.toolbar.move((screen_width - 540) // 2, 30)
 
         layout = QHBoxLayout(self.toolbar)
@@ -357,13 +485,11 @@ class GhostUI(QMainWindow):
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-
         gradient = QRadialGradient(self.width() / 2, self.height() / 2, self.width())
         gradient.setColorAt(0, QColor(30, 60, 150, 25))
         gradient.setColorAt(0.7, QColor(20, 40, 100, 15))
         gradient.setColorAt(1, QColor(10, 20, 50, 20))
         painter.fillRect(self.rect(), gradient)
-
         self._draw_toolbar_glass(painter)
         self.painter.paint_event(event)
 
@@ -372,26 +498,8 @@ class GhostUI(QMainWindow):
         path = QPainterPath()
         toolbar_rect = self.toolbar.geometry()
         path.addRoundedRect(toolbar_rect.toRectF(), 20, 20)
-        
         painter.fillPath(path, QColor(35, 35, 50, 160))
-        
-        gradient = QLinearGradient(toolbar_rect.x(), toolbar_rect.y(), toolbar_rect.x(), toolbar_rect.bottom())
-        gradient.setColorAt(0, QColor(255, 255, 255, 50))
-        gradient.setColorAt(0.3, QColor(255, 255, 255, 15))
-        gradient.setColorAt(1, QColor(255, 255, 255, 30))
-        painter.fillPath(path, gradient)
-        
-        border_gradient = QLinearGradient(toolbar_rect.left(), toolbar_rect.top(), toolbar_rect.right(), toolbar_rect.bottom())
-        border_gradient.setColorAt(0, QColor(255, 255, 255, 100))
-        border_gradient.setColorAt(0.5, QColor(200, 200, 255, 80))
-        border_gradient.setColorAt(1, QColor(180, 180, 255, 70))
-        painter.setPen(QPen(border_gradient, 2))
-        painter.drawPath(path)
         painter.restore()
-
-    def clear_checks(self):
-        for b in [self.btn_draw, self.btn_erase, self.btn_text, self.btn_shape]:
-            b.setChecked(False)
 
     def enable_draw(self):
         self.tool_state.mode = "draw"
@@ -401,7 +509,7 @@ class GhostUI(QMainWindow):
 
     def enable_erase(self):
         self.tool_state.mode = "erase"
-        self.setCursor(Qt.CursorShape.BlankCursor)  # Hide cursor, we'll draw custom one
+        self.setCursor(Qt.CursorShape.BlankCursor)
         self.clear_checks()
         self.btn_erase.setChecked(True)
 
@@ -413,7 +521,6 @@ class GhostUI(QMainWindow):
         self.toggle_shape_popover()
 
     def delete_textbox(self, textbox):
-        """Callback for textbox deletion"""
         if textbox in self.textboxes:
             self.textboxes.remove(textbox)
 
@@ -435,6 +542,10 @@ class GhostUI(QMainWindow):
             box.close()
         self.textboxes.clear()
         self.update()
+        
+    def clear_checks(self):
+        for b in [self.btn_draw, self.btn_erase, self.btn_text, self.btn_shape]:
+            b.setChecked(False)
 
     def export_canvas(self):
         text_data = [(b.text(), b.x(), b.y(), b.width(), b.height()) for b in self.textboxes]
@@ -480,7 +591,7 @@ class GhostUI(QMainWindow):
         if self.tool_state.mode in ("draw", "shape", "erase"):
             self.painter.mouse_move(event)
         if self.tool_state.mode == "erase":
-            self.update()  # Update to show eraser cursor
+            self.update()
 
     def mouseReleaseEvent(self, event):
         if self.tool_state.mode in ("draw", "shape", "erase"):
@@ -505,11 +616,9 @@ class GhostUI(QMainWindow):
             self.painter.redo()
         elif event.key() == Qt.Key.Key_S and event.modifiers() == Qt.KeyboardModifier.ControlModifier:
             self.export_canvas()
-        elif event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
-            self.submit_to_ai()
         elif event.key() == Qt.Key.Key_Escape:
             self.close()
-
+            
     def closeEvent(self, event):
         if self.brush_popover:
             self.brush_popover.close()
@@ -518,88 +627,26 @@ class GhostUI(QMainWindow):
         super().closeEvent(event)
 
     def submit_to_ai(self):
+        prompt = self.command_bar.input.text()
+        attached_files = self.command_bar.attached_files
+        # Get selected model from Dropdown
+        selected_model = self.command_bar.model_combo.currentText()
+        
+        if not prompt.strip() and not attached_files:
+            prompts = [b.text() for b in self.textboxes if b.text().strip()]
+            prompt = " ".join(prompts) if prompts else "Explain this."
+
         text_data = [(b.text(), b.x(), b.y(), b.width(), b.height()) for b in self.textboxes]
-        prompts = [b.text() for b in self.textboxes if b.text().strip()]
-        prompt = " ".join(prompts) if prompts else "Explain what is highlighted."
-        self.hide()
+        
+        self.toolbar.hide()
+        self.command_bar.hide()
+        for b in self.textboxes: b.hide()
+        
         QApplication.processEvents()
+        
         path = capture_screen_with_overlay(self.painter.strokes, text_data)
+        
         self.close()
-        self.ai_client.send_image(path, prompt)
-
-
-class ResponseWindow(QWidget):
-    def __init__(self, text):
-        super().__init__()
-        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.Tool)
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.resize(520, 400)
-
-        screen = QApplication.primaryScreen().geometry()
-        self.move((screen.width() - 520) // 2, (screen.height() - 400) // 2)
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-
-        title_bar = QWidget()
-        title_bar.setFixedHeight(50)
-        title_layout = QHBoxLayout(title_bar)
-        title_layout.setContentsMargins(20, 10, 15, 10)
-
-        title_label = QLabel("✨ AI Response")
-        title_label.setStyleSheet("color: rgba(255,255,255,240); font-size: 15px; font-weight: 600;")
-        title_layout.addWidget(title_label)
-        title_layout.addStretch()
-
-        close_btn = QPushButton("✕")
-        close_btn.setFixedSize(32, 32)
-        close_btn.clicked.connect(self.close)
-        close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        close_btn.setStyleSheet("""
-            QPushButton {
-                background: transparent; color: rgba(255,255,255,180);
-                font-size: 20px; border: none; border-radius: 16px;
-            }
-            QPushButton:hover {
-                background: rgba(255,100,100,180); color: white;
-            }
-        """)
-        title_layout.addWidget(close_btn)
-        layout.addWidget(title_bar)
-
-        self.text_area = QTextEdit()
-        self.text_area.setReadOnly(True)
-        self.text_area.setStyleSheet("""
-            QTextEdit {
-                background: transparent; border: none; padding: 20px;
-                selection-background-color: rgba(120,120,255,100);
-            }
-        """)
-        formatted = text.replace("\n", "<br>")
-        self.text_area.setHtml(f"<div style='color:#eee; font-size:14px; line-height:1.6; font-family:Segoe UI'>{formatted}</div>")
-        layout.addWidget(self.text_area)
-
-        self.old_pos = self.pos()
-
-    def paintEvent(self, event):
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        path = QPainterPath()
-        path.addRoundedRect(self.rect().toRectF(), 18, 18)
-        painter.fillPath(path, QColor(35, 35, 50, 240))
         
-        gradient = QLinearGradient(0, 0, 0, self.height())
-        gradient.setColorAt(0, QColor(255, 255, 255, 50))
-        gradient.setColorAt(1, QColor(255, 255, 255, 20))
-        painter.fillPath(path, gradient)
-        
-        painter.setPen(QPen(QColor(255, 255, 255, 80), 2))
-        painter.drawPath(path)
-
-    def mousePressEvent(self, event):
-        self.old_pos = event.globalPosition().toPoint()
-
-    def mouseMoveEvent(self, event):
-        delta = event.globalPosition().toPoint() - self.old_pos
-        self.move(self.pos() + delta)
-        self.old_pos = event.globalPosition().toPoint()
+        # Emit signal including the selected model
+        self.capture_completed.emit(path, prompt, attached_files, selected_model)

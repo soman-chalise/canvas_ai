@@ -9,16 +9,29 @@ def capture_screen_with_overlay(points, textboxes):
     draw = ImageDraw.Draw(screenshot)
 
     # Draw strokes
+# Draw strokes
     for stroke in points:
-        pts = stroke["points"]
-        color = stroke["color"]
-        size = stroke["size"]
+        if stroke.get("type") == "stroke":
+            # Use the "points" list we saved in Painter for compatibility with Pillow
+            pts = stroke["points"] 
+            color = stroke["color"]
+            size = stroke["size"]
 
-        if len(pts) > 1:
-            draw.line(
-                [(p.x(), p.y()) for p in pts],
-                fill=(color.red(), color.green(), color.blue()),
-                width=size
+            if len(pts) > 1:
+                draw.line(
+                    [(p.x(), p.y()) for p in pts],
+                    fill=(color.red(), color.green(), color.blue()),
+                    width=size
+                )
+        # Add this if you want shapes (rectangles/circles) to show up in the screenshot
+        elif stroke.get("type") == "shape":
+            # Basic rectangle support for the demo
+            start, end = stroke["start"], stroke["end"]
+            color = stroke["color"]
+            draw.rectangle(
+                [start.x(), start.y(), end.x(), end.y()],
+                outline=(color.red(), color.green(), color.blue()),
+                width=stroke["size"]
             )
 
 

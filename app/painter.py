@@ -1,7 +1,6 @@
-from PyQt6.QtCore import Qt, QPoint, QRect
-from PyQt6.QtGui import QPainter, QColor, QPen, QPainterPath, QPolygon
+from PyQt6.QtCore import Qt, QPoint, QPointF, QRect, QRectF
+from PyQt6.QtGui import QPainter, QColor, QPen, QPainterPath, QPolygon, QPolygonF
 import math
-
 
 class Painter:
     def __init__(self, parent, tool_state):
@@ -31,25 +30,26 @@ class Painter:
         if event.button() != Qt.MouseButton.LeftButton:
             return
 
-        # Eraser - now works like a brush
+        # Eraser
         if self.tool_state.mode == "erase":
             self.drawing = True
-            self.redo_stack.clear()
-            self.current_stroke = {
-                "type": "erase_stroke",
-                "points": [event.position().toPoint()],
-                "size": self.tool_state.brush_size * 3  # Eraser is bigger
-            }
             self._erase_at_point(event.position().toPoint())
             return
 
-        # Drawing
+        # Drawing (Smoother Path)
         if self.tool_state.mode == "draw":
             self.drawing = True
             self.redo_stack.clear()
+            path = QPainterPath()
+            
+            # FIX: Convert QPoint to QPointF for QPainterPath
+            start_pt = event.position().toPoint()
+            path.moveTo(QPointF(start_pt))
+            
             self.current_stroke = {
                 "type": "stroke",
-                "points": [event.position().toPoint()],
+                "path": path, 
+                "points": [start_pt], # Keep integer QPoint for math/erasing logic
                 "color": QColor(self.tool_state.color),
                 "size": self.tool_state.brush_size
             }
@@ -66,19 +66,20 @@ class Painter:
         if not self.drawing:
             return
 
+        pos = event.position().toPoint()
+
         if self.tool_state.mode == "erase":
-            # Continuously erase as mouse moves
-            point = event.position().toPoint()
-            self.current_stroke["points"].append(point)
-            self._erase_at_point(point)
+            self._erase_at_point(pos)
             self.parent.update()
 
         elif self.tool_state.mode == "draw" and self.current_stroke:
-            self.current_stroke["points"].append(event.position().toPoint())
+            # FIX: Convert QPoint to QPointF for lineTo
+            self.current_stroke["points"].append(pos)
+            self.current_stroke["path"].lineTo(QPointF(pos)) 
             self.parent.update()
 
         elif self.tool_state.mode == "shape" and self.shape_start:
-            self.shape_preview = event.position().toPoint()
+            self.shape_preview = pos
             self.parent.update()
 
     def mouse_release(self, event):
@@ -87,7 +88,6 @@ class Painter:
 
         if self.tool_state.mode == "erase":
             self.drawing = False
-            self.current_stroke = None
 
         elif self.tool_state.mode == "draw":
             self.drawing = False
@@ -97,8 +97,7 @@ class Painter:
             self.drawing = False
             end_point = event.position().toPoint()
             
-            # Only add shape if there's meaningful size
-            if (end_point - self.shape_start).manhattanLength() > 10:
+            if (end_point - self.shape_start).manhattanLength() > 5:
                 shape_data = {
                     "type": "shape",
                     "shape": self.tool_state.shape_type,
@@ -114,162 +113,102 @@ class Painter:
             self.parent.update()
 
     def _erase_at_point(self, erase_point):
-        """Erase portions of strokes that intersect with the eraser point"""
-        erase_radius = self.tool_state.brush_size * 3
-        strokes_to_remove = []
-        strokes_to_add = []
-        
+        """Robust Erase: Removes entire strokes that are touched."""
+        erase_radius = self.tool_state.brush_size * 4
+        indices_to_remove = []
+
+        # Create an erase rect for checking intersection
+        erase_rect_f = QRectF(
+            erase_point.x() - erase_radius, 
+            erase_point.y() - erase_radius, 
+            erase_radius * 2, 
+            erase_radius * 2
+        )
+
         for i, item in enumerate(self.strokes):
+            hit = False
             if item["type"] == "stroke":
-                # Check each point in the stroke
-                new_segments = []
-                current_segment = []
-                
-                for point in item["points"]:
-                    distance = math.sqrt((point.x() - erase_point.x())**2 + 
-                                       (point.y() - erase_point.y())**2)
-                    
-                    if distance > erase_radius:
-                        # Point is outside eraser radius, keep it
-                        current_segment.append(point)
-                    else:
-                        # Point is inside eraser radius, break the stroke
-                        if len(current_segment) > 1:
-                            new_segments.append(current_segment)
-                        current_segment = []
-                
-                # Add the last segment if it exists
-                if len(current_segment) > 1:
-                    new_segments.append(current_segment)
-                
-                # If stroke was broken into segments, replace it
-                if len(new_segments) == 0:
-                    strokes_to_remove.append(i)
-                elif len(new_segments) > 1 or len(new_segments[0]) < len(item["points"]):
-                    strokes_to_remove.append(i)
-                    for segment in new_segments:
-                        if len(segment) > 1:
-                            strokes_to_add.append({
-                                "type": "stroke",
-                                "points": segment,
-                                "color": QColor(item["color"]),
-                                "size": item["size"]
-                            })
+                # 1. Check if the bounding box of the stroke path intersects erase area
+                if item["path"].controlPointRect().intersects(erase_rect_f):
+                    # 2. Detail check: Check individual points if bounding box matches
+                    # This prevents deleting a stroke just because its huge bounding box overlaps
+                    for point in item["points"]:
+                        if (point - erase_point).manhattanLength() < erase_radius:
+                            hit = True
+                            break
             
             elif item["type"] == "shape":
-                # Check if erase point is near the shape
                 rect = QRect(item["start"], item["end"]).normalized()
-                # Expand rect by erase radius for hit detection
-                expanded_rect = rect.adjusted(-erase_radius, -erase_radius, 
-                                             erase_radius, erase_radius)
-                if expanded_rect.contains(erase_point):
-                    strokes_to_remove.append(i)
-        
-        # Remove strokes in reverse order to maintain indices
-        for i in reversed(strokes_to_remove):
+                # Expand rect slightly for hit detection
+                expanded = rect.adjusted(-erase_radius, -erase_radius, erase_radius, erase_radius)
+                if expanded.contains(erase_point):
+                    hit = True
+
+            if hit:
+                indices_to_remove.append(i)
+
+        # Remove in reverse
+        for i in reversed(indices_to_remove):
             self.strokes.pop(i)
-        
-        # Add new segments
-        self.strokes.extend(strokes_to_add)
 
     def paint_event(self, event):
         painter = QPainter(self.parent)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
-        # Background with subtle gradient
+        # Background
         painter.fillRect(self.parent.rect(), QColor(0, 50, 150, 20))
 
-        # Draw all strokes and shapes
+        # Draw all strokes
         for item in self.strokes:
             if item["type"] == "stroke":
-                self._draw_stroke(painter, item)
+                pen = QPen(item["color"], item["size"], Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
+                painter.setPen(pen)
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.drawPath(item["path"])
+                
             elif item["type"] == "shape":
                 self._draw_shape(painter, item)
 
-        # Draw shape preview
+        # Draw Preview
         if self.tool_state.mode == "shape" and self.shape_start and self.shape_preview:
             preview_item = {
-                "type": "shape",
                 "shape": self.tool_state.shape_type,
                 "start": self.shape_start,
                 "end": self.shape_preview,
                 "color": QColor(self.tool_state.color),
                 "size": self.tool_state.brush_size
             }
-            # Draw preview with transparency
             preview_item["color"].setAlpha(150)
             self._draw_shape(painter, preview_item)
         
-        # Draw eraser cursor preview
+        # Eraser Cursor
         if self.tool_state.mode == "erase" and hasattr(self.parent, 'last_mouse_pos'):
-            erase_radius = self.tool_state.brush_size * 3
-            painter.setPen(QPen(QColor(255, 100, 100, 150), 2, Qt.PenStyle.DashLine))
-            painter.setBrush(QColor(255, 255, 255, 30))
-            painter.drawEllipse(self.parent.last_mouse_pos, erase_radius, erase_radius)
-
-    def _draw_stroke(self, painter, stroke):
-        """Draw a freehand stroke"""
-        painter.setPen(QPen(
-            stroke["color"],
-            stroke["size"],
-            Qt.PenStyle.SolidLine,
-            Qt.PenCapStyle.RoundCap,
-            Qt.PenJoinStyle.RoundJoin
-        ))
-
-        pts = stroke["points"]
-        for i in range(len(pts) - 1):
-            painter.drawLine(pts[i], pts[i + 1])
+            r = self.tool_state.brush_size * 4
+            painter.setPen(QPen(QColor(255, 255, 255, 180), 1, Qt.PenStyle.DashLine))
+            painter.setBrush(QColor(255, 100, 100, 50))
+            painter.drawEllipse(self.parent.last_mouse_pos, r, r)
 
     def _draw_shape(self, painter, shape):
-        """Draw a geometric shape"""
-        pen = QPen(
-            shape["color"],
-            shape["size"],
-            Qt.PenStyle.SolidLine,
-            Qt.PenCapStyle.RoundCap,
-            Qt.PenJoinStyle.RoundJoin
-        )
+        pen = QPen(shape["color"], shape["size"], Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
         painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
 
-        start = shape["start"]
-        end = shape["end"]
-        shape_type = shape["shape"]
-
-        if shape_type == "rectangle":
-            rect = QRect(start, end)
-            painter.drawRect(rect.normalized())
-
-        elif shape_type == "circle":
-            rect = QRect(start, end)
-            painter.drawEllipse(rect.normalized())
-
-        elif shape_type == "line":
+        start, end = shape["start"], shape["end"]
+        
+        if shape["shape"] == "rectangle":
+            painter.drawRect(QRect(start, end))
+        elif shape["shape"] == "circle":
+            painter.drawEllipse(QRect(start, end))
+        elif shape["shape"] == "line":
             painter.drawLine(start, end)
-
-        elif shape_type == "arrow":
+        elif shape["shape"] == "arrow":
             self._draw_arrow(painter, start, end, shape["size"])
 
     def _draw_arrow(self, painter, start, end, size):
-        """Draw an arrow from start to end"""
-        # Draw the main line
         painter.drawLine(start, end)
-
-        # Calculate arrow head
         angle = math.atan2(end.y() - start.y(), end.x() - start.x())
-        arrow_size = max(10, size * 3)
-
-        # Arrow head points
-        p1 = QPoint(
-            int(end.x() - arrow_size * math.cos(angle - math.pi / 6)),
-            int(end.y() - arrow_size * math.sin(angle - math.pi / 6))
-        )
-        p2 = QPoint(
-            int(end.x() - arrow_size * math.cos(angle + math.pi / 6)),
-            int(end.y() - arrow_size * math.sin(angle + math.pi / 6))
-        )
-
-        # Draw arrow head
-        arrow_head = QPolygon([end, p1, p2])
+        arrow_size = max(12, size * 3)
+        p1 = QPoint(int(end.x() - arrow_size * math.cos(angle - math.pi / 6)), int(end.y() - arrow_size * math.sin(angle - math.pi / 6)))
+        p2 = QPoint(int(end.x() - arrow_size * math.cos(angle + math.pi / 6)), int(end.y() - arrow_size * math.sin(angle + math.pi / 6)))
         painter.setBrush(painter.pen().color())
-        painter.drawPolygon(arrow_head)
+        painter.drawPolygon(QPolygon([end, p1, p2]))
