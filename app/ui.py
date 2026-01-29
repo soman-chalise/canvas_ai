@@ -9,6 +9,7 @@ from PyQt6.QtGui import (
     QPainterPath, QPen, QLinearGradient, QRadialGradient
 )
 import ollama
+import logging
 
 # --- IMPORTS FROM YOUR MODULES ---
 from .painter import Painter
@@ -603,11 +604,16 @@ class GhostUI(QMainWindow):
         
         try:
             # 2. Capture (Fixed argument: pass self)
+            logging.info("Calling capture_screen_with_overlay...")
             path = capture_screen_with_overlay(self) 
+            logging.info(f"Capture returned path: {path}")
             
             # 3. Close and Emit
             self.close()
+            logging.info(f"Emitting capture_completed signal with path: {path}")
             self.capture_completed.emit(path, prompt, attached_files, selected_model)
+        except Exception as e:
+            logging.error(f"Error in submit_to_ai: {e}", exc_info=True)
         finally:
             self._is_submitting = False
             self.command_bar.btn_enter.setEnabled(True)

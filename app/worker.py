@@ -3,17 +3,33 @@ import time
 import logging
 import ollama
 from PyQt6.QtCore import QThread, pyqtSignal
-from google.genai import types
+
+# Optional: Google GenAI types
+try:
+    from google.genai import types
+except ImportError:
+    types = None
 
 def read_file_content(path):
     """Reads content from various file types for AI context."""
     ext = os.path.splitext(path)[1].lower()
     try:
         if ext == '.pdf':
-            from pypdf import PdfReader
+            try:
+                from pypdf import PdfReader
+            except ImportError:
+                return "[Error: pypdf library not installed. Cannot read PDF.]"
+                
             reader = PdfReader(path)
-            return "\n".join([page.extract_text() for page in reader.pages if page.extract_text()])
-        elif ext in ['.txt', '.md', '.py', '.js', '.html', '.css', '.json', '.xml', '.yaml', '.cpp', '.h']:
+            text = []
+            for page in reader.pages:
+                extracted = page.extract_text()
+                if extracted:
+                    text.append(extracted)
+            return "\n".join(text)
+            
+        elif ext in ['.txt', '.md', '.py', '.js', '.html', '.css', '.json', '.xml', '.yaml', '.cpp', '.h', '.docx']:
+            # Basic text reading
             with open(path, 'r', encoding='utf-8', errors='ignore') as f:
                 return f.read()
         else:
@@ -46,8 +62,13 @@ class AIWorker(QThread):
             for file_path in self.attached_files:
                 if os.path.exists(file_path):
                     filename = os.path.basename(file_path)
-                    file_content = read_file_content(file_path)
-                    file_context += f"\n--- FILE: {filename} ---\n{file_content}\n"
+                    content = read_file_content(file_path)
+                    file_context += f"\n--- FILE: {filename} ---\n{content}\n"
+            
+            if file_context:
+                logging.info(f"Generated file context length: {len(file_context)} chars")
+            else:
+                logging.info("No file context generated.")
 
             # ==========================================
             # GEMINI PROVIDER (with Retry Logic)
@@ -55,6 +76,8 @@ class AIWorker(QThread):
             if self.ai_client.provider == "gemini":
                 if not self.ai_client.gemini_client:
                     raise Exception("Gemini API Key not found.")
+                
+                logging.info(f"Using Gemini provider with model: {self.ai_client.model_name}")
 
                 # Prepare Gemini-specific contents format
                 gemini_contents = []
@@ -65,17 +88,27 @@ class AIWorker(QThread):
                     # Attach file context to the VERY LAST user message
                     if i == len(active_history) - 1 and file_context:
                         text_content = f"CONTEXT FROM FILES:\n{file_context}\n\nUSER QUERY: {text_content}"
+                        logging.info("Attached file context to Gemini message.")
                         
-                    parts.append(types.Part.from_text(text=text_content))
+                    if types:
+                        parts.append(types.Part.from_text(text=text_content))
                     
-                    # Attach images (screenshots) if they exist
-                    for img_path in msg['images']:
-                        if os.path.exists(img_path):
-                            with open(img_path, "rb") as f:
-                                img_data = f.read()
-                                parts.append(types.Part.from_bytes(data=img_data, mime_type="image/jpeg"))
-                    
-                    gemini_contents.append(types.Content(role=msg['role'], parts=parts))
+                        # Attach images (screenshots) if they exist
+                        images_list = msg.get('images', [])
+                        
+                        for img_path in images_list:
+                            if os.path.exists(img_path):
+                                with open(img_path, "rb") as f:
+                                    img_data = f.read()
+                                    # Detect mime type based on file extension
+                                    if img_path.lower().endswith('.png'):
+                                        mime_type = "image/png"
+                                    else:
+                                        mime_type = "image/jpeg"
+                                    
+                                    parts.append(types.Part.from_bytes(data=img_data, mime_type=mime_type))
+                        
+                        gemini_contents.append(types.Content(role=msg['role'], parts=parts))
 
                 # --- RETRY LOOP FOR 429 ERRORS ---
                 max_retries = 3
@@ -105,13 +138,9 @@ class AIWorker(QThread):
                             time.sleep(retry_delay)
                             retry_delay *= 2 # Exponential backoff
                             continue
-                        
-                        # If 409 Conflict: user sent request while previous was active
                         elif "409" in err_str:
                             self.error.emit("Conflict: A previous request is still finishing. Please wait 3 seconds.")
                             return
-                        
-                        # Otherwise, it's a real error
                         else:
                             raise e
 
@@ -119,12 +148,14 @@ class AIWorker(QThread):
             # OLLAMA PROVIDER
             # ==========================================
             elif self.ai_client.provider == "ollama":
+                logging.info(f"Using Ollama provider with model: {self.ai_client.model_name}")
                 ollama_messages = []
                 
                 for i, msg in enumerate(active_history):
                     content = msg['text']
                     if i == len(active_history) - 1 and file_context:
                         content = f"CONTEXT FROM FILES:\n{file_context}\n\nUSER QUERY: {content}"
+                        logging.info("Attached file context to Ollama message.")
 
                     role = 'assistant' if msg['role'] == 'model' else 'user'
                     message_dict = {'role': role, 'content': content}
@@ -151,8 +182,8 @@ class AIWorker(QThread):
             self.finished.emit()
 
         except Exception as e:
-            # Final User-Friendly Error Mapping
             error_msg = str(e)
+            logging.error(f"Worker Error: {error_msg}")
             if "429" in error_msg:
                 self.error.emit("Rate limit reached. The free tier allows about 15 requests per minute. Please slow down.")
             elif "quota" in error_msg.lower():

@@ -5,3 +5,4 @@ backup.py
 captures
 app_debug.log
 app_error.log
+chat_history.db

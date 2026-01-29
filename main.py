@@ -1,8 +1,9 @@
 import sys
 import os
 import logging
+import keyboard # pip install keyboard
 from PyQt6.QtWidgets import QApplication, QSystemTrayIcon, QMenu, QStyle
-from PyQt6.QtGui import QAction
+from PyQt6.QtGui import QAction, QIcon
 from PyQt6.QtCore import QObject, pyqtSignal, Qt
 
 # Import your modules
@@ -11,97 +12,160 @@ from app.chat_ui import ChatWindow
 from app.ai_client import AIClient
 
 # --- DEV LOGGING ---
+# Create formatters
+log_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+
+# Create handlers
+console_handler = logging.StreamHandler(sys.stdout)
+console_handler.setLevel(logging.INFO)
+console_handler.setFormatter(log_formatter)
+
+# Debug file handler (captures all logs)
+debug_file_handler = logging.FileHandler('app_debug.log', mode='a', encoding='utf-8')
+debug_file_handler.setLevel(logging.DEBUG)
+debug_file_handler.setFormatter(log_formatter)
+
+# Error file handler (captures only errors and critical)
+error_file_handler = logging.FileHandler('app_error.log', mode='a', encoding='utf-8')
+error_file_handler.setLevel(logging.ERROR)
+error_file_handler.setFormatter(log_formatter)
+
+# Configure root logger
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,  # Set to DEBUG to capture all logs
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.StreamHandler(sys.stdout)  # Print to console
-        # logging.FileHandler("app.log")   # Uncomment for file logging
+        console_handler,
+        debug_file_handler,
+        error_file_handler
     ]
 )
 
-def create_tray_icon(app, toggle_callback):
-    """
-    Creates a system tray icon that toggles the overlay when clicked.
-    """
-    # Use standard computer icon
-    icon = app.style().standardIcon(QStyle.StandardPixmap.SP_ComputerIcon)
-    tray_icon = QSystemTrayIcon(icon, app)
-    tray_icon.setToolTip("Canvas Copilot")
+class AppController(QObject):
+    open_canvas_signal = pyqtSignal() # Thread-safe signal
 
-    # Double click or Single click to toggle
-    tray_icon.activated.connect(lambda reason: toggle_callback() if reason in (
-        QSystemTrayIcon.ActivationReason.Trigger, 
-        QSystemTrayIcon.ActivationReason.DoubleClick
-    ) else None)
+    def __init__(self, app):
+        super().__init__()
+        self.app = app
+        
+        try:
+            logging.info("Initializing Backend...")
+            
+            # 1. Dependency Injection
+            self.ai_client = AIClient()
+            
+            # 2. Init Windows
+            self.chat_win = ChatWindow(self.ai_client)
+            self.ghost_win = GhostUI(self.ai_client)
+            
+            # 3. Wiring Signals
+            # When Canvas captures -> Send to Chat
+            self.ghost_win.capture_completed.connect(self.handle_canvas_capture)
+            
+            # When Hotkey pressed -> Toggle Canvas
+            self.open_canvas_signal.connect(self.toggle_canvas)
 
-    # Context Menu
-    menu = QMenu()
-    
-    action_open = QAction("Annotate Screen", app)
-    action_open.triggered.connect(toggle_callback)
-    menu.addAction(action_open)
+            # 4. System Tray
+            self.setup_tray()
 
-    menu.addSeparator()
+            # 5. Register Hotkey (Alt+Q)
+            # We use a lambda to emit a Qt signal because 'keyboard' runs in a background thread
+            try:
+                keyboard.add_hotkey('alt+q', lambda: self.open_canvas_signal.emit())
+                logging.info("Global Hotkey 'Alt+Q' registered.")
+            except ImportError:
+                logging.warning("Library 'keyboard' not installed. Hotkeys disabled.")
+            except Exception as e:
+                logging.error(f"Hotkey Error: {e}")
 
-    action_exit = QAction("Exit", app)
-    action_exit.triggered.connect(app.quit)
-    menu.addAction(action_exit)
+            # 6. App starts minimally - windows only open when triggered
+            # (Chat opens via tray click, Canvas via Alt+Q)
 
-    tray_icon.setContextMenu(menu)
-    tray_icon.show()
-    return tray_icon
+            logging.info("-------------------------------------------")
+            logging.info("AI Shell Running")
+            logging.info("-> Click Tray Icon to open Chat")
+            logging.info("-> Press Alt+Q to open Canvas")
+            logging.info("-------------------------------------------")
+
+        except Exception as e:
+            logging.critical(f"Startup Error: {e}", exc_info=True)
+            sys.exit(1)
+
+    def setup_tray(self):
+        self.tray_icon = QSystemTrayIcon(self.app)
+        
+        # --- FIX: Use SP_ComputerIcon instead of the non-existent ShellIcon ---
+        icon = self.app.style().standardIcon(QStyle.StandardPixmap.SP_ComputerIcon)
+        self.tray_icon.setIcon(icon)
+        self.tray_icon.setToolTip("AI Shell")
+
+        # Context Menu
+        menu = QMenu()
+        
+        action_chat = QAction("Open AI Chat", self.app)
+        action_chat.triggered.connect(self.toggle_chat)
+        menu.addAction(action_chat)
+
+        action_canvas = QAction("Open Canvas Overlay (Alt+Q)", self.app)
+        action_canvas.triggered.connect(self.toggle_canvas)
+        menu.addAction(action_canvas)
+
+        menu.addSeparator()
+
+        action_exit = QAction("Exit", self.app)
+        action_exit.triggered.connect(self.exit_app)
+        menu.addAction(action_exit)
+
+        self.tray_icon.setContextMenu(menu)
+        
+        # Click tray to toggle chat
+        self.tray_icon.activated.connect(lambda reason: self.toggle_chat() if reason in (
+            QSystemTrayIcon.ActivationReason.Trigger, 
+            QSystemTrayIcon.ActivationReason.DoubleClick
+        ) else None)
+        
+        self.tray_icon.show()
+
+    def toggle_chat(self):
+        # Logic: If hidden, show Maximized. 
+        if self.chat_win.isVisible():
+            self.chat_win.hide()
+        else:
+            self.chat_win.showMaximized() # <--- CHANGED FROM show()
+            self.chat_win.raise_()
+            self.chat_win.activateWindow()
+
+    def toggle_canvas(self):
+        if self.ghost_win.isVisible():
+            self.ghost_win.hide()
+        else:
+            # Reset before showing
+            self.ghost_win.clear_all()
+            self.ghost_win.showFullScreen()
+            self.ghost_win.raise_()
+            self.ghost_win.activateWindow()
+
+    def handle_canvas_capture(self, image_path, prompt, attached_files, model):
+        # Open chat and pass the screenshot data
+        self.chat_win.handle_capture(image_path, prompt, attached_files, model)
+
+    def exit_app(self):
+        self.app.quit()
 
 def main():
-    # 1. High DPI Fixes (Must be before QApplication)
+    # 1. High DPI Fixes
     os.environ["QT_AUTO_SCREEN_SCALE_FACTOR"] = "1"
     QApplication.setHighDpiScaleFactorRoundingPolicy(
-        Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
+        Qt.HighDpiScaleFactorRoundingPolicy.Floor
     )
 
     app = QApplication(sys.argv)
-    app.setQuitOnLastWindowClosed(False) # Daemon mode
+    app.setQuitOnLastWindowClosed(False) # Keep running when windows close (Tray mode)
 
-    try:
-        logging.info("Initializing Backend...")
-        
-        # 2. Dependency Injection
-        # Initialize the client once here, pass it down
-        ai_client = AIClient()
-        
-        # 3. Init Windows
-        # We don't show them yet
-        chat_win = ChatWindow(ai_client)
-        ghost_win = GhostUI(ai_client)
-        
-        # 4. Wiring Signals
-        # When GhostUI finishes capture -> Open ChatWindow
-        ghost_win.capture_completed.connect(chat_win.handle_capture)
-
-        # 5. Toggle Logic
-        def toggle_overlay():
-            if ghost_win.isVisible():
-                ghost_win.hide()
-            else:
-                # Reset state before showing
-                ghost_win.clear_all()
-                ghost_win.showFullScreen()
-                ghost_win.raise_()
-                ghost_win.activateWindow()
-
-        # 6. System Tray
-        tray = create_tray_icon(app, toggle_overlay)
-
-        logging.info("-------------------------------------------")
-        logging.info("Canvas Copilot Running")
-        logging.info("-> Click the System Tray icon to Annotate")
-        logging.info("-------------------------------------------")
-        
-        sys.exit(app.exec())
-        
-    except Exception as e:
-        logging.critical(f"Fatal Startup Error: {e}", exc_info=True)
-        sys.exit(1)
+    # Initialize Controller
+    controller = AppController(app)
+    
+    sys.exit(app.exec())
 
 if __name__ == "__main__":
     main()
